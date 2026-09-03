@@ -1,0 +1,57 @@
+name: Build Pizza Snake
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:   # allows manual trigger from the Actions tab
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Pillow
+        run: pip install pillow
+
+      - name: Download and install pvsneslib
+        run: |
+          curl -L -o pvsneslib.zip \
+            https://github.com/alekmaul/pvsneslib/releases/download/4.3.0/pvsneslib_430_64b_linux_release.zip
+          mkdir -p pvsneslib_install
+          unzip -q pvsneslib.zip -d pvsneslib_install
+          # Make toolchain binaries executable
+          chmod +x pvsneslib_install/pvsneslib/devkitsnes/bin/*
+          # Some releases nest an extra folder; normalize the path
+          if [ -d pvsneslib_install/pvsneslib/pvsneslib ]; then
+            mv pvsneslib_install/pvsneslib/pvsneslib pvsneslib_install/pvsneslib_tmp
+            rm -rf pvsneslib_install/pvsneslib
+            mv pvsneslib_install/pvsneslib_tmp pvsneslib_install/pvsneslib
+          fi
+
+      - name: Build ROM
+        env:
+          PVSNESLIB_HOME: ${{ github.workspace }}/pvsneslib_install/pvsneslib
+        run: |
+          export PATH="$PATH:$PVSNESLIB_HOME/devkitsnes/bin"
+          echo "PVSNESLIB_HOME=$PVSNESLIB_HOME"
+          ls -la "$PVSNESLIB_HOME/devkitsnes/bin" || true
+          make
+
+      - name: Upload ROM artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pizzasnake-sfc
+          path: pizzasnake.sfc
+          if-no-files-found: error
+          retention-days: 30
+
