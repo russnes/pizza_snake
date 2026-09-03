@@ -91,12 +91,21 @@ changes when it eats (not with distance travelled), the *oldest* baked
 segment is erased at the same rate new ones are added, keeping the total
 length correctly matched to your score.
 
-Each baked tile is chosen by classifying which two edges of that 8×8 tile
-the path entered and exited through, and picking one of three fixed
-connector shapes (straight, or a corner) already drawn to touch each edge
-at a consistent point. That's what keeps the tail's width even and lets it
-connect seamlessly into the sprite-rendered head, regardless of how tightly
-the snake is turning.
+Each baked tile is chosen by exactly where the path enters and exits that
+8×8 tile — packed as (edge, position-along-edge) rather than a raw pixel
+coordinate, since a point sitting exactly at a tile's corner is genuinely
+ambiguous as a bare coordinate. Every one of the resulting 32×32 possible
+touch-point combinations has its own generated connector shape (reduced to
+144 unique physical tiles via hflip/vflip, the only symmetries SNES
+actually gives for free), looked up with a single table index — so the
+baked tail matches the snake's real recorded path pixel-for-pixel instead
+of snapping every turn to one of a handful of fixed shapes, while staying
+just as cheap at runtime as the simpler version: one lookup, no drawing.
+Whichever cell is entered borrows its touch point from the cell being
+exited, so the two always agree exactly on the shared boundary; the rare
+case where the path clips a tile corner between two samples (skipping the
+cell that would normally connect them) is resolved by interpolating the
+skipped crossing instead of leaving a gap.
 
 ## Known limitations
 
