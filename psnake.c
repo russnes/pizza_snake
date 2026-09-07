@@ -299,19 +299,33 @@ void drawSprites(void)
 }
 
 //---------------------------------------------------------------------------------
-#define ABS32(v) ((v) < 0 ? -(v) : (v))
-/* Round num/den to the nearest integer (ties away from zero) instead of
-   truncating toward zero -- plain integer division here would bias the
-   rare diagonal-interpolation case by up to a pixel, e.g. -1/-2 truncates
-   to 0 when the mathematically nearer answer is the same either way, but
-   103.5 truncates down to 103 instead of rounding to 104. Doesn't affect
-   whether two cells' touch points agree (both sides of a junction always
-   use this same computed value), only how close that shared value lands
-   to the true crossing point. */
-#define DIV_ROUND(num, den) \
-    ((((num) < 0) == ((den) < 0)) \
-        ? (s32)((ABS32(num) + ABS32(den) / 2) / ABS32(den)) \
-        : -(s32)((ABS32(num) + ABS32(den) / 2) / ABS32(den)))
+s32 abs32(s32 v)
+{
+    return (v < 0) ? -v : v;
+}
+
+//---------------------------------------------------------------------------------
+s32 divRound(s32 num, s32 den)
+{
+    /* Round num/den to the nearest integer (ties away from zero) instead
+       of truncating toward zero -- plain integer division here would bias
+       the rare diagonal-interpolation case by up to a pixel, e.g. -1/-2
+       truncates to 0 when the mathematically nearer answer is the same
+       either way, but 103.5 truncates down to 103 instead of rounding to
+       104. Doesn't affect whether two cells' touch points agree (both
+       sides of a junction always use this same computed value), only how
+       close that shared value lands to the true crossing point.
+       Deliberately a real function, not a macro: num/den are often
+       themselves multi-step expressions (see interpAlong), and a macro
+       that mentions its arguments more than once would recompute those
+       expressions repeatedly after expansion -- which is exactly what
+       blew up 816-tcc's stack-temporary count enough to overflow the
+       assembler's 8-bit stack-relative addressing here. */
+    s32 aNum = abs32(num);
+    s32 aDen = abs32(den);
+    s32 mag = (aNum + aDen / 2) / aDen;
+    return ((num < 0) == (den < 0)) ? mag : -mag;
+}
 
 u8 axisDir(u16 fromCell, u16 toCell)
 {
@@ -340,6 +354,103 @@ void finalizeTile(u16 cell, u8 entryPoint, u8 exitPoint)
     blockmap[cell] = tailConnectorTile[(u16)entryPoint * 32 + exitPoint];
     if (dirtyCount < MAX_DIRTY)
         dirtyCell[dirtyCount++] = cell;
+}
+
+//---------------------------------------------------------------------------------
+u8 bakeSimpleCrossing(u16 pendingCell, u8 pendingEntryPoint, u16 cell, u8 d, u8 localX, u8 localY)
+{
+    /* Simple axis crossing: borrow the along-edge coordinate from THIS
+       sample (the cell being entered) for both cells' shared touch point.
+       A raw sample lands within ~2px of the boundary it just crossed, not
+       exactly on it, so using each side's own independent sample can
+       disagree by a pixel and leave a hairline seam -- sharing one value
+       guarantees both sides agree exactly. Returns the touch point the
+       newly-entered cell should use as ITS entry. */
+    u8 along = (d == 0 || d == 1) ? localY : localX;
+    finalizeTile(pendingCell, pendingEntryPoint, POINT(d, along));
+    return POINT(d ^ 1, along);
+}
+
+//---------------------------------------------------------------------------------
+u8 interpAlong(u16 refCell, u8 d, s32 ax, s32 ay, s32 ddx, s32 ddy)
+{
+    /* Where the straight line from (ax,ay) to (ax+ddx,ay+ddy) crosses
+       refCell's edge d, expressed as the local along-edge coordinate.
+       Split out from bakeDiagonalCrossing (which needs this twice) purely
+       to keep any single function's expression count -- and therefore its
+       816-tcc stack-temporary usage -- small enough to fit an 8-bit
+       stack-relative offset; see bakeDiagonalCrossing's comment. */
+    s32 b;
+    if (d == 0 || d == 1)
+    {
+        b = ((s32)(refCell % 32) + (d == 1 ? 1 : 0)) * 8;
+        if (ddx == 0) return (u8)((u16)ay & 7);
+        return (u8)((u16)(ay + divRound((b - ax) * ddy, ddx)) & 7);
+    }
+    b = ((s32)(refCell / 32) + (d == 3 ? 1 : 0)) * 8;
+    if (ddy == 0) return (u8)((u16)ax & 7);
+    return (u8)((u16)(ax + divRound((b - ay) * ddx, ddy)) & 7);
+}
+
+//---------------------------------------------------------------------------------
+u16 diagonalMidCell(u16 pendingCell, u16 cell, s32 ax, s32 ay, s32 ddx, s32 ddy)
+{
+    /* Which of the two cells diagonally between pendingCell and cell the
+       straight line between the last two samples actually clipped
+       through -- split out for the same stack-frame-size reason as
+       interpAlong above. */
+    s16 dCol = (s16)(cell % 32) - (s16)(pendingCell % 32);
+    s16 dRow = (s16)(cell / 32) - (s16)(pendingCell / 32);
+    s32 colBoundary = ((s32)(pendingCell % 32) + (dCol > 0 ? 1 : 0)) * 8;
+    s32 rowBoundary = ((s32)(pendingCell / 32) + (dRow > 0 ? 1 : 0)) * 8;
+    s32 tCol = abs32(colBoundary - ax) * abs32(ddy);
+    s32 tRow = abs32(rowBoundary - ay) * abs32(ddx);
+    if (tCol < tRow)
+        return (dCol > 0) ? (u16)(pendingCell + 1) : (u16)(pendingCell - 1);
+    return (dRow > 0) ? (u16)(pendingCell + 32) : (u16)(pendingCell - 32);
+}
+
+//---------------------------------------------------------------------------------
+u8 bakeDiagonalCrossing(u16 pendingCell, u8 pendingEntryPoint, u16 cell,
+                         u16 prevX, u16 prevY, u16 curX, u16 curY)
+{
+    /* Diagonal: the path clipped a tile corner between the last sample and
+       this one, skipping the cell that would normally share a full edge
+       with both neighbours -- the two cells here only share a single
+       corner pixel. Find which of the two candidate cells the straight
+       line between the last two samples actually passed through, and
+       bake that skipped cell too. The real work is split into
+       diagonalMidCell()/interpAlong() above: 816-tcc allocates a stack
+       slot per sub-expression rather than per C variable, so a function
+       with this many nested computations in one body can overflow the
+       8-bit stack-relative addressing the assembler needs -- keeping each
+       function's own expression count small avoids that regardless of
+       how much total work the whole crossing needs. */
+    s32 ax = (s32)prevX, ay = (s32)prevY;
+    s32 ddx = (s32)curX - ax, ddy = (s32)curY - ay;
+    u16 midCell = diagonalMidCell(pendingCell, cell, ax, ay, ddx, ddy);
+    u8 d1 = axisDir(pendingCell, midCell);
+    u8 along1 = interpAlong(pendingCell, d1, ax, ay, ddx, ddy);
+    u8 d2 = axisDir(midCell, cell);
+    u8 along2 = interpAlong(midCell, d2, ax, ay, ddx, ddy);
+
+    finalizeTile(pendingCell, pendingEntryPoint, POINT(d1, along1));
+    finalizeTile(midCell, POINT(d1 ^ 1, along1), POINT(d2, along2));
+    return POINT(d2 ^ 1, along2);
+}
+
+//---------------------------------------------------------------------------------
+u8 bakeFirstCell(u8 localX, u8 localY)
+{
+    /* First cell ever baked: no previous cell to derive an exact touch
+       point from, so fall back to whichever edge the raw sample is
+       nearest -- a one-time approximation that only ever affects the very
+       start of the baked trail. */
+    u8 d0 = 0, best = localX, dd;
+    dd = (u8)(7 - localX); if (dd < best) { best = dd; d0 = 1; }
+    dd = localY;           if (dd < best) { best = dd; d0 = 2; }
+    dd = (u8)(7 - localY); if (dd < best) { best = dd; d0 = 3; }
+    return POINT(d0, (d0 == 0 || d0 == 1) ? localY : localX);
 }
 
 //---------------------------------------------------------------------------------
@@ -414,88 +525,14 @@ u8 stepSnake(void)
                     {
                         u8 d = axisDir(pendingCell, cell);
                         if (d != 0xFF)
-                        {
-                            /* Simple axis crossing: borrow the along-edge
-                               coordinate from THIS sample (the cell being
-                               entered) for both cells' shared touch point.
-                               A raw sample lands within ~2px of the
-                               boundary it just crossed, not exactly on it,
-                               so using each side's own independent sample
-                               can disagree by a pixel and leave a hairline
-                               seam -- sharing one value guarantees both
-                               sides agree exactly. */
-                            u8 along = (d == 0 || d == 1) ? localY : localX;
-                            finalizeTile(pendingCell, pendingEntryPoint, POINT(d, along));
-                            entryForNext = POINT(d ^ 1, along);
-                        }
+                            entryForNext = bakeSimpleCrossing(pendingCell, pendingEntryPoint, cell, d, localX, localY);
                         else
-                        {
-                            /* Diagonal: the path clipped a tile corner
-                               between the last sample and this one,
-                               skipping the cell that would normally share
-                               a full edge with both neighbours -- the two
-                               cells here only share a single corner pixel.
-                               Interpolate the straight line between the
-                               last two samples to find which of the two
-                               candidate cells it actually passed through,
-                               and bake that skipped cell too. */
-                            s16 dCol = (s16)(cell % 32) - (s16)(pendingCell % 32);
-                            s16 dRow = (s16)(cell / 32) - (s16)(pendingCell / 32);
-                            s32 ax = (s32)prevBakeX, ay = (s32)prevBakeY;
-                            s32 ddx = (s32)bx - ax, ddy = (s32)by - ay;
-                            s32 colBoundary = ((s32)(pendingCell % 32) + (dCol > 0 ? 1 : 0)) * 8;
-                            s32 rowBoundary = ((s32)(pendingCell / 32) + (dRow > 0 ? 1 : 0)) * 8;
-                            s32 tCol = ABS32(colBoundary - ax) * ABS32(ddy);
-                            s32 tRow = ABS32(rowBoundary - ay) * ABS32(ddx);
-                            u16 midCell;
-                            u8 d1, d2, along1, along2, midEntry;
-
-                            if (tCol < tRow)
-                                midCell = (dCol > 0) ? (u16)(pendingCell + 1) : (u16)(pendingCell - 1);
-                            else
-                                midCell = (dRow > 0) ? (u16)(pendingCell + 32) : (u16)(pendingCell - 32);
-
-                            d1 = axisDir(pendingCell, midCell);
-                            if (d1 == 0 || d1 == 1)
-                            {
-                                s32 b1 = ((s32)(pendingCell % 32) + (d1 == 1 ? 1 : 0)) * 8;
-                                along1 = (u8)((u16)((ddx != 0) ? (ay + DIV_ROUND((b1 - ax) * ddy, ddx)) : ay) & 7);
-                            }
-                            else
-                            {
-                                s32 b1 = ((s32)(pendingCell / 32) + (d1 == 3 ? 1 : 0)) * 8;
-                                along1 = (u8)((u16)((ddy != 0) ? (ax + DIV_ROUND((b1 - ay) * ddx, ddy)) : ax) & 7);
-                            }
-                            finalizeTile(pendingCell, pendingEntryPoint, POINT(d1, along1));
-                            midEntry = POINT(d1 ^ 1, along1);
-
-                            d2 = axisDir(midCell, cell);
-                            if (d2 == 0 || d2 == 1)
-                            {
-                                s32 b2 = ((s32)(midCell % 32) + (d2 == 1 ? 1 : 0)) * 8;
-                                along2 = (u8)((u16)((ddx != 0) ? (ay + DIV_ROUND((b2 - ax) * ddy, ddx)) : ay) & 7);
-                            }
-                            else
-                            {
-                                s32 b2 = ((s32)(midCell / 32) + (d2 == 3 ? 1 : 0)) * 8;
-                                along2 = (u8)((u16)((ddy != 0) ? (ax + DIV_ROUND((b2 - ay) * ddx, ddy)) : ax) & 7);
-                            }
-                            finalizeTile(midCell, midEntry, POINT(d2, along2));
-                            entryForNext = POINT(d2 ^ 1, along2);
-                        }
+                            entryForNext = bakeDiagonalCrossing(pendingCell, pendingEntryPoint, cell,
+                                                                 prevBakeX, prevBakeY, bx, by);
                     }
                     else
                     {
-                        /* First cell ever baked: no previous cell to derive
-                           an exact touch point from, so fall back to
-                           whichever edge the raw sample is nearest -- a
-                           one-time approximation that only ever affects
-                           the very start of the baked trail. */
-                        u8 d0 = 0, best = localX, dd;
-                        dd = (u8)(7 - localX); if (dd < best) { best = dd; d0 = 1; }
-                        dd = localY;           if (dd < best) { best = dd; d0 = 2; }
-                        dd = (u8)(7 - localY); if (dd < best) { best = dd; d0 = 3; }
-                        entryForNext = POINT(d0, (d0 == 0 || d0 == 1) ? localY : localX);
+                        entryForNext = bakeFirstCell(localX, localY);
                     }
                     pendingCell = cell;
                     pendingEntryPoint = entryForNext;
