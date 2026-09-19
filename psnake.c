@@ -70,6 +70,7 @@ u16 snakeAge;
 u16 nextBakeSample;
 u16 nextEraseSample;
 u16 lastErasedCell;
+u16 prevEraseX, prevEraseY;
 
 /* Baked background body: every touch point the path makes with a tile
    boundary is represented as (edge, along) -- which of the 4 edges, and
@@ -552,11 +553,33 @@ u8 stepSnake(void)
                 u16 cell = (ey >> 3) * 32 + (ex >> 3);
                 if (cell != lastErasedCell)
                 {
+                    /* A diagonal skip during baking wrote a tile into a
+                       synthesized intermediate cell that no raw sample
+                       ever actually lands in (see bakeDiagonalCrossing) --
+                       so without this, erasure -- which only ever walks
+                       real samples -- would never visit that cell either,
+                       leaving it permanently baked: still solid for
+                       collision, and still visibly on screen, long after
+                       the rest of the tail has moved past it. Detecting
+                       the same diagonal skip here and erasing the same
+                       synthesized cell keeps erase exactly in step with
+                       bake. */
+                    if (lastErasedCell != 0xFFFF && axisDir(lastErasedCell, cell) == 0xFF)
+                    {
+                        u16 midCell = diagonalMidCell(lastErasedCell, cell,
+                                                       (s32)prevEraseX, (s32)prevEraseY,
+                                                       (s32)ex - (s32)prevEraseX, (s32)ey - (s32)prevEraseY);
+                        blockmap[midCell] = TILE_BLANK;
+                        if (dirtyCount < MAX_DIRTY)
+                            dirtyCell[dirtyCount++] = midCell;
+                    }
                     blockmap[cell] = TILE_BLANK;
                     if (dirtyCount < MAX_DIRTY)
                         dirtyCell[dirtyCount++] = cell;
                     lastErasedCell = cell;
                 }
+                prevEraseX = ex;
+                prevEraseY = ey;
                 nextEraseSample += BAKE_STEP;
             }
         }

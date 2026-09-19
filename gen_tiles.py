@@ -29,8 +29,9 @@ from PIL import Image, ImageDraw
 # a 32x32 lookup table mapping any raw touch-point pair straight to a
 # tile id + flip bits, emitted below as tailConnectorTile[].
 THICK = 2.0   # half-thickness of the body band, matches the sprite's width
-PULL = 0.55   # how far the curve's control point is pulled toward the tile centre
-STUB = THICK
+TANGENT_LEN = 2.6  # length of each endpoint's tangent handle, see _connector_mask --
+                   # tuned empirically: shorter reads as barely-curved, longer
+                   # overshoots into a blobby pinch (checked visually up to 5.5)
 
 
 def _edge_xy(edge, along):
@@ -38,14 +39,6 @@ def _edge_xy(edge, along):
     if edge == 1: return (7, along)
     if edge == 2: return (along, 0)
     return (along, 7)
-
-
-def _inward(edge, along, dist):
-    x, y = _edge_xy(edge, along)
-    if edge == 0: return (x + dist, y)
-    if edge == 1: return (x - dist, y)
-    if edge == 2: return (x, y + dist)
-    return (x, y - dist)
 
 
 def _point_index(edge, along):
@@ -70,32 +63,49 @@ def _vflip_point(idx):
     return _point_index(e, 7 - a)  # left/right: row mirrors
 
 
+def _inward_dir(edge):
+    """Unit direction pointing from this edge INTO the tile -- used as the
+    curve's tangent direction at that endpoint (see _connector_mask)."""
+    return {0: (1, 0), 1: (-1, 0), 2: (0, 1), 3: (0, -1)}[edge]
+
+
 def _connector_mask(a_idx, b_idx):
     """Rasterise a constant-thickness curve between two boundary touch
-    points. Interior pixels use distance to a bezier body curve that
-    bulges toward the tile centre; each of the 4 boundary lines is
-    instead rendered SEPARATELY, as a simple band around its own touch
-    point (if it has one), so a touch on one edge can never leak into a
-    different edge's rendering. That matters because two neighbouring
-    tiles are compared edge-to-edge: any such leak would show up as a
-    mismatch against a neighbour that has no corresponding feature at
-    all (this is also why a band never reaches all the way to position 0
-    or 7 -- those pixels are shared with the perpendicular edge)."""
+    points. Each of the 4 boundary lines is rendered SEPARATELY, as a
+    simple band around its own touch point (if it has one), so a touch on
+    one edge can never leak into a different edge's rendering -- that
+    matters because two neighbouring tiles are compared edge-to-edge, and
+    any such leak would show up as a mismatch against a neighbour that has
+    no corresponding feature at all (this is also why a band never
+    reaches all the way to position 0 or 7 -- those pixels are shared
+    with the perpendicular edge).
+
+    The interior body is a CUBIC bezier rather than a simple
+    pull-toward-centre quadratic, specifically so its tangent at each
+    endpoint is locked to point straight into the tile, perpendicular to
+    whichever edge that endpoint sits on. That direction depends only on
+    which edge was touched, never on where along it or what the other
+    endpoint is -- so two tiles sharing a boundary always arrive/depart
+    in the same direction, giving continuous curve direction across the
+    seam for free, without tracking or looking up any extra per-touch
+    angle data (compare TILE_BODY_BASE's neighbour, whose corner tile
+    used the same idea implicitly by only ever connecting edge-midpoints)."""
     ea, aa = _point_unpack(a_idx)
     eb, ab = _point_unpack(b_idx)
-    a_body = _inward(ea, aa, STUB)
-    b_body = _inward(eb, ab, STUB)
-
-    cx, cy = (a_body[0] + b_body[0]) / 2, (a_body[1] + b_body[1]) / 2
-    ctrlx = cx + (3.5 - cx) * PULL
-    ctrly = cy + (3.5 - cy) * PULL
+    P0 = _edge_xy(ea, aa)
+    P3 = _edge_xy(eb, ab)
+    ia = _inward_dir(ea)
+    ib = _inward_dir(eb)
+    P1 = (P0[0] + ia[0]*TANGENT_LEN, P0[1] + ia[1]*TANGENT_LEN)
+    P2 = (P3[0] + ib[0]*TANGENT_LEN, P3[1] + ib[1]*TANGENT_LEN)
 
     curve_pts = []
-    BODY_STEPS = 32
+    BODY_STEPS = 40
     for s in range(BODY_STEPS + 1):
         t = s / BODY_STEPS
-        qx = (1-t)**2 * a_body[0] + 2*(1-t)*t * ctrlx + t**2 * b_body[0]
-        qy = (1-t)**2 * a_body[1] + 2*(1-t)*t * ctrly + t**2 * b_body[1]
+        mt = 1 - t
+        qx = mt**3*P0[0] + 3*mt**2*t*P1[0] + 3*mt*t**2*P2[0] + t**3*P3[0]
+        qy = mt**3*P0[1] + 3*mt**2*t*P1[1] + 3*mt*t**2*P2[1] + t**3*P3[1]
         curve_pts.append((qx, qy))
 
     mask = [[False]*8 for _ in range(8)]
