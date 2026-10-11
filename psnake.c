@@ -44,8 +44,33 @@ extern char palwalls, palwalls_end;
 #define ST_ENTERNAME 3
 #define ST_HISCORES  4
 
-#define NAME_LEN     3
+#define NAME_LEN     8
 #define NUM_SCORES   20
+#define SCORE_DIGITS 5     /* score is a u16 (max 65535), so 5 digits is exact */
+#define NO_RANK      0xFF  /* "this game didn't make the table" */
+
+/* Name entry: each position cycles through A-Z, 0-9 and space. */
+#define NAME_CHAR_COUNT 37
+#define NAME_ENTRY_COL  ((32 - NAME_LEN) / 2)
+#define REPEAT_DELAY    20 /* frames Up/Down must be held before auto-repeat starts */
+#define REPEAT_RATE     4  /* frames between repeats once it has started */
+
+/* High score table screen layout (tile columns/rows). */
+#define HS_COL_RANK   6
+#define HS_COL_NAME   10
+#define HS_COL_SCORE  20
+#define HS_ROW_FIRST  5
+
+/* Battery-backed SRAM save format (see saveHighScores()):
+     [0..3]  magic "PZSN"
+     [4]     NAME_LEN        } so changing either constant invalidates old
+     [5]     NUM_SCORES      } saves instead of misreading them
+     [6..]   NUM_SCORES x { NAME_LEN name bytes, score lo, score hi }
+     last 2  checksum over everything before it (lo, hi) */
+#define SAVE_HDR_LEN    6
+#define SAVE_ENTRY_LEN  (NAME_LEN + 2)
+#define SAVE_BODY_LEN   (SAVE_HDR_LEN + NUM_SCORES * SAVE_ENTRY_LEN)
+#define SAVE_SIZE       (SAVE_BODY_LEN + 2)
 
 //---------------------------------------------------------------------------------
 u16 blockmap[0x400];
@@ -112,6 +137,8 @@ u8 nameCursor;
 
 u16 hsScore[NUM_SCORES];
 char hsName[NUM_SCORES][NAME_LEN + 1];
+u8 newRank;               /* table slot of the score just entered, or NO_RANK */
+u8 saveBuf[SAVE_SIZE];    /* staging buffer for SRAM reads/writes */
 
 //---------------------------------------------------------------------------------
 u16 nextRand(void)
@@ -154,6 +181,30 @@ void writeNum(u16 col, u16 row, u16 num, u8 len)
         num /= 10;
         p--;
     }
+}
+
+//---------------------------------------------------------------------------------
+void writeRepeat(u16 col, u16 row, char ch, u8 count)
+{
+    u16 p = row * 32 + col;
+    u8 i;
+    for (i = 0; i < count; i++)
+        blockmap[p + i] = asciiTile[(u8)ch & 0x7F];
+}
+
+//---------------------------------------------------------------------------------
+void waitReleased(u16 mask)
+{
+    /* Block until none of the buttons in `mask` is held. Every screen that
+       reacts to START/A/B calls this before it starts listening: the button
+       press that brought the player here (e.g. START confirming a name) is
+       usually still physically down for a few frames, and without this it
+       would instantly dismiss the *next* screen too -- the high score table
+       would flash past unseen. Only the buttons the screen itself uses are
+       waited on, so holding a d-pad direction from the moment of death
+       doesn't stall anything. */
+    while (padsCurrent(0) & mask)
+        WaitForVBlank();
 }
 
 //---------------------------------------------------------------------------------
@@ -239,12 +290,13 @@ void resetGame(void)
 //---------------------------------------------------------------------------------
 void drawHud(void)
 {
+    /* "SCORE nnnnn  HI NAMENAME nnnnn" -- fills cols 1..30 of row 0 */
     writeText(1, 0, "SCORE");
-    writeNum(7, 0, score, 6);
-    writeText(18, 0, "HI");
+    writeNum(7, 0, score, SCORE_DIGITS);
+    writeText(14, 0, "HI");
     if (hsScore[0])
-        writeText(21, 0, hsName[0]);
-    writeNum(25, 0, hsScore[0], 6);
+        writeText(17, 0, hsName[0]);
+    writeNum(26, 0, hsScore[0], SCORE_DIGITS);
 }
 
 //---------------------------------------------------------------------------------
@@ -644,15 +696,131 @@ u8 stepSnake(void)
 }
 
 //---------------------------------------------------------------------------------
+// High score persistence (battery-backed SRAM, 2 KB at $70:0000 on LoROM)
+//---------------------------------------------------------------------------------
+u16 saveChecksum(u16 len)
+{
+    /* Position-sensitive rotate-and-add over saveBuf[0..len). Not
+       cryptographic -- just enough to notice a blank/garbage/foreign SRAM. */
+    u16 sum = 0x5A5A;
+    u16 i;
+    for (i = 0; i < len; i++)
+    {
+        sum = (u16)((sum << 1) | (sum >> 15));
+        sum += saveBuf[i];
+    }
+    return sum;
+}
+
+//---------------------------------------------------------------------------------
+void clearHighScores(void)
+{
+    u8 i, j;
+    for (i = 0; i < NUM_SCORES; i++)
+    {
+        hsScore[i] = 0;
+        for (j = 0; j < NAME_LEN; j++)
+            hsName[i][j] = ' ';
+        hsName[i][NAME_LEN] = 0;
+    }
+}
+
+//---------------------------------------------------------------------------------
+void saveHighScores(void)
+{
+    u16 p, sum;
+    u8 i, j;
+
+    saveBuf[0] = 'P';
+    saveBuf[1] = 'Z';
+    saveBuf[2] = 'S';
+    saveBuf[3] = 'N';
+    saveBuf[4] = NAME_LEN;
+    saveBuf[5] = NUM_SCORES;
+
+    p = SAVE_HDR_LEN;
+    for (i = 0; i < NUM_SCORES; i++)
+    {
+        for (j = 0; j < NAME_LEN; j++)
+        {
+            saveBuf[p] = (u8)hsName[i][j];
+            p++;
+        }
+        saveBuf[p] = (u8)(hsScore[i] & 0xFF);
+        saveBuf[p + 1] = (u8)(hsScore[i] >> 8);
+        p += 2;
+    }
+
+    sum = saveChecksum(SAVE_BODY_LEN);
+    saveBuf[SAVE_BODY_LEN] = (u8)(sum & 0xFF);
+    saveBuf[SAVE_BODY_LEN + 1] = (u8)(sum >> 8);
+
+    consoleCopySram(saveBuf, SAVE_SIZE);
+}
+
+//---------------------------------------------------------------------------------
+u8 saveBufIsValid(void)
+{
+    u16 sum;
+    if (saveBuf[0] != 'P' || saveBuf[1] != 'Z' || saveBuf[2] != 'S' || saveBuf[3] != 'N')
+        return 0;
+    if (saveBuf[4] != NAME_LEN || saveBuf[5] != NUM_SCORES)
+        return 0;
+    sum = saveChecksum(SAVE_BODY_LEN);
+    if (saveBuf[SAVE_BODY_LEN] != (u8)(sum & 0xFF))
+        return 0;
+    if (saveBuf[SAVE_BODY_LEN + 1] != (u8)(sum >> 8))
+        return 0;
+    return 1;
+}
+
+//---------------------------------------------------------------------------------
+void loadHighScores(void)
+{
+    /* Called once at power-on. Blank, corrupt or foreign SRAM (first boot,
+       an emulator that hands back zeroes/0xFF, a flashcart without SRAM
+       mapped) falls back to an empty table, which is then written back so
+       the next boot finds a valid save. The game still works with no SRAM
+       present -- scores just last until power-off. */
+    u16 p;
+    u8 i, j;
+
+    consoleLoadSram(saveBuf, SAVE_SIZE);
+    if (!saveBufIsValid())
+    {
+        clearHighScores();
+        saveHighScores();
+        return;
+    }
+
+    p = SAVE_HDR_LEN;
+    for (i = 0; i < NUM_SCORES; i++)
+    {
+        for (j = 0; j < NAME_LEN; j++)
+        {
+            hsName[i][j] = (char)saveBuf[p];
+            p++;
+        }
+        hsName[i][NAME_LEN] = 0;
+        hsScore[i] = (u16)saveBuf[p] | ((u16)saveBuf[p + 1] << 8);
+        p += 2;
+    }
+}
+
+//---------------------------------------------------------------------------------
 u8 qualifiesForHighScore(void)
 {
     return (score > 0 && score > hsScore[NUM_SCORES - 1]);
 }
 
 //---------------------------------------------------------------------------------
-void insertHighScore(u16 s, const char *name)
+u8 insertHighScore(u16 s, const char *name)
 {
+    /* Returns the slot the score landed in, or NO_RANK if it didn't make
+       the table. Equal scores rank below existing ones (first to reach a
+       score keeps the higher spot). */
     s8 slot, i;
+    u8 j;
     slot = -1;
     for (i = 0; i < NUM_SCORES; i++)
     {
@@ -663,71 +831,118 @@ void insertHighScore(u16 s, const char *name)
         }
     }
     if (slot < 0)
-        return;
+        return NO_RANK;
     for (i = NUM_SCORES - 1; i > slot; i--)
     {
         hsScore[i] = hsScore[i - 1];
-        hsName[i][0] = hsName[i - 1][0];
-        hsName[i][1] = hsName[i - 1][1];
-        hsName[i][2] = hsName[i - 1][2];
-        hsName[i][3] = hsName[i - 1][3];
+        for (j = 0; j <= NAME_LEN; j++)
+            hsName[i][j] = hsName[i - 1][j];
     }
     hsScore[slot] = s;
-    hsName[slot][0] = name[0];
-    hsName[slot][1] = name[1];
-    hsName[slot][2] = name[2];
-    hsName[slot][3] = 0;
+    for (j = 0; j < NAME_LEN; j++)
+        hsName[slot][j] = name[j];
+    hsName[slot][NAME_LEN] = 0;
+    return (u8)slot;
+}
+
+//---------------------------------------------------------------------------------
+char nameCharFromIndex(u8 idx)
+{
+    if (idx < 26)
+        return (char)('A' + idx);
+    if (idx < 36)
+        return (char)('0' + (idx - 26));
+    return ' ';
 }
 
 //---------------------------------------------------------------------------------
 void drawNameRow(u16 row, u8 blinkOn)
 {
+    /* Spaces are drawn as '_' placeholders so all NAME_LEN slots are visible
+       while typing (an actual space is invisible), and the cursor blinks
+       between its glyph and blank -- which also works on a placeholder. */
     u8 i;
+    char c;
     for (i = 0; i < NAME_LEN; i++)
     {
+        c = nameCharFromIndex(nameLetters[i]);
+        if (c == ' ')
+            c = '_';
         if (i == nameCursor && !blinkOn)
-            blockmap[row * 32 + 14 + i] = TILE_BLANK;
+            blockmap[row * 32 + NAME_ENTRY_COL + i] = TILE_BLANK;
         else
-            blockmap[row * 32 + 14 + i] = asciiTile[(u8)('A' + nameLetters[i])];
+            blockmap[row * 32 + NAME_ENTRY_COL + i] = asciiTile[(u8)c];
     }
+}
+
+//---------------------------------------------------------------------------------
+void nameStepChar(u8 up)
+{
+    if (up)
+        nameLetters[nameCursor] = (nameLetters[nameCursor] + NAME_CHAR_COUNT - 1) % NAME_CHAR_COUNT;
+    else
+        nameLetters[nameCursor] = (nameLetters[nameCursor] + 1) % NAME_CHAR_COUNT;
 }
 
 //---------------------------------------------------------------------------------
 void nameEntryScreen(void)
 {
-    u16 padOld = 0;
+    u16 padOld;
     u16 frameCount = 0;
     u16 pressed;
+    u16 hold = 0;
     u8 i;
 
-    for (i = 0; i < NAME_LEN; i++)
-        nameLetters[i] = 0;
+    /* Start as "A" followed by spaces: a short name needs no cleanup, and
+       with 8 positions that saves a lot of button-mashing. */
+    nameLetters[0] = 0;
+    for (i = 1; i < NAME_LEN; i++)
+        nameLetters[i] = NAME_CHAR_COUNT - 1;
     nameCursor = 0;
 
     drawWalls();
-    writeText(6, 11, "NEW HIGH SCORE");
-    writeText(9, 13, "SCORE");
-    writeNum(15, 13, score, 6);
-    writeText(7, 17, "ENTER YOUR NAME");
-    writeText(9, 21, "LEFT RIGHT PICK");
-    writeText(6, 22, "UP DOWN CHANGE LETTER");
+    writeText(9, 8, "NEW HIGH SCORE");
+    writeText(10, 10, "SCORE");
+    writeNum(16, 10, score, SCORE_DIGITS);
+    writeText(8, 13, "ENTER YOUR NAME");
+    writeText(8, 19, "LEFT RIGHT MOVE");
+    writeText(9, 21, "UP DOWN CHANGE");
+    writeText(9, 23, "START CONFIRM");
+
+    /* Treat anything already held when the game ended (typically the
+       d-pad turn button) as old, not as a fresh press. */
+    padOld = padsCurrent(0);
 
     for (;;)
     {
         pad0 = padsCurrent(0);
         pressed = pad0 & (u16)(~padOld);
+        padOld = pad0;
 
         if (pressed & KEY_LEFT)
             nameCursor = (nameCursor == 0) ? 0 : nameCursor - 1;
         if (pressed & KEY_RIGHT)
             nameCursor = (nameCursor >= NAME_LEN - 1) ? nameCursor : nameCursor + 1;
-        if (pressed & KEY_UP)
-            nameLetters[nameCursor] = (nameLetters[nameCursor] + 25) % 26;
-        if (pressed & KEY_DOWN)
-            nameLetters[nameCursor] = (nameLetters[nameCursor] + 1) % 26;
-        padOld = pad0;
 
-        drawNameRow(19, (frameCount >> 4) & 1);
+        /* Up/Down: step on press, then auto-repeat while held (there are
+           37 characters to cycle through, one press each would be tedious) */
+        if (pressed & (KEY_UP | KEY_DOWN))
+        {
+            nameStepChar((pressed & KEY_UP) ? 1 : 0);
+            hold = 0;
+        }
+        else if (pad0 & (KEY_UP | KEY_DOWN))
+        {
+            hold++;
+            if (hold >= REPEAT_DELAY && ((hold - REPEAT_DELAY) % REPEAT_RATE) == 0)
+                nameStepChar((pad0 & KEY_UP) ? 1 : 0);
+        }
+        else
+        {
+            hold = 0;
+        }
+
+        drawNameRow(15, (frameCount >> 4) & 1);
 
         WaitForVBlank();
         dmaCopyVram((u8 *)blockmap, 0x0000, 0x800);
@@ -738,37 +953,89 @@ void nameEntryScreen(void)
     }
 
     for (i = 0; i < NAME_LEN; i++)
-        hiName[i] = 'A' + nameLetters[i];
+        hiName[i] = nameCharFromIndex(nameLetters[i]);
     hiName[NAME_LEN] = 0;
 
-    insertHighScore(score, hiName);
+    newRank = insertHighScore(score, hiName);
+    if (newRank != NO_RANK)
+        saveHighScores();
+}
+
+//---------------------------------------------------------------------------------
+void drawScoreRow(u8 i, u8 show)
+{
+    /* One table row: rank always, name + score only when `show` (so the
+       freshly-entered row can blink without its rank number jumping). Empty
+       slots show dashes. */
+    u16 row = HS_ROW_FIRST + i;
+    writeNum(HS_COL_RANK, row, i + 1, 2);
+    if (!show)
+    {
+        clearMapRegion(row * 32 + HS_COL_NAME, HS_COL_SCORE + SCORE_DIGITS - HS_COL_NAME, TILE_BLANK);
+        return;
+    }
+    if (hsScore[i])
+    {
+        writeText(HS_COL_NAME, row, hsName[i]);
+        writeNum(HS_COL_SCORE, row, hsScore[i], SCORE_DIGITS);
+    }
+    else
+    {
+        writeRepeat(HS_COL_NAME, row, '-', NAME_LEN);
+        writeRepeat(HS_COL_SCORE, row, '-', SCORE_DIGITS);
+    }
 }
 
 //---------------------------------------------------------------------------------
 void hiScoresScreen(void)
 {
     u8 i;
+    u8 blinkOn = 1;
+    u8 rowDirty = 0;
+    u16 frameCount = 0;
+
     drawWalls();
-    writeText(11, 3, "HIGH SCORES");
+    writeText(10, 1, "HIGH SCORES");
+    writeText(HS_COL_RANK, 3, "NO");
+    writeText(HS_COL_NAME, 3, "NAME");
+    writeText(HS_COL_SCORE, 3, "SCORE");
     for (i = 0; i < NUM_SCORES; i++)
-    {
-        u16 row = 5 + i;
-        writeNum(3, row, i + 1, 2);
-        if (hsScore[i])
-        {
-            writeText(7, row, hsName[i]);
-            writeNum(16, row, hsScore[i], 6);
-        }
-    }
+        drawScoreRow(i, 1);
+    writeText(10, 26, "PRESS START");
     WaitForVBlank();
     dmaCopyVram((u8 *)blockmap, 0x0000, 0x800);
+
+    waitReleased(KEY_START | KEY_A | KEY_B);
     for (;;)
     {
         pad0 = padsCurrent(0);
+
+        /* blink the row the player just earned, so it's easy to spot in a
+           table of 20 */
+        if (newRank != NO_RANK)
+        {
+            u8 phase = (u8)((frameCount >> 4) & 1) ^ 1; /* start visible */
+            if (phase != blinkOn)
+            {
+                blinkOn = phase;
+                drawScoreRow(newRank, blinkOn);
+                rowDirty = 1;
+            }
+        }
+
         WaitForVBlank();
+        if (rowDirty)
+        {
+            u16 cell = (u16)(HS_ROW_FIRST + newRank) * 32;
+            dmaCopyVram((u8 *)&blockmap[cell], cell, 64);
+            rowDirty = 0;
+        }
+        frameCount++;
+
         if (pad0 & (KEY_START | KEY_B | KEY_A))
             break;
     }
+    newRank = NO_RANK;
     gameState = ST_TITLE;
 }
 
@@ -781,12 +1048,14 @@ void titleScreen(void)
     writeText(3, 14, "PRESS SELECT FOR SCORES");
     if (hsScore[0])
     {
-        writeText(7, 18, "HI SCORE");
-        writeText(16, 18, hsName[0]);
-        writeNum(20, 18, hsScore[0], 6);
+        writeText(4, 18, "HI SCORE");
+        writeText(13, 18, hsName[0]);
+        writeNum(22, 18, hsScore[0], SCORE_DIGITS);
     }
     WaitForVBlank();
     dmaCopyVram((u8 *)blockmap, 0x0000, 0x800);
+
+    waitReleased(KEY_START | KEY_SELECT);
     for (;;)
     {
         pad0 = padsCurrent(0);
@@ -794,6 +1063,11 @@ void titleScreen(void)
         if (pad0 & KEY_START)
         {
             resetGame();
+            /* resetGame() only rebuilt the tilemap in RAM; push it to VRAM so
+               the title text doesn't stay painted on the playing field (the
+               in-game loop only ever uploads the HUD row and changed cells) */
+            WaitForVBlank();
+            dmaCopyVram((u8 *)blockmap, 0x0000, 0x800);
             gameState = ST_PLAYING;
             return;
         }
@@ -810,20 +1084,26 @@ void gameOverScreen(void)
 {
     hideAllSprites();
 
+    /* After every game the player ends up on the high score table:
+       qualifying score -> name entry -> table (new row blinking),
+       otherwise        -> game over / final score -> table. */
     if (qualifiesForHighScore())
     {
         nameEntryScreen();
-        gameState = ST_TITLE;
+        gameState = ST_HISCORES;
         return;
     }
 
+    newRank = NO_RANK;
     drawWalls();
     writeText(11, 12, "GAME OVER");
-    writeText(9, 15, "SCORE");
-    writeNum(15, 15, score, 6);
-    writeText(6, 18, "PRESS START");
+    writeText(10, 15, "SCORE");
+    writeNum(16, 15, score, SCORE_DIGITS);
+    writeText(10, 18, "PRESS START");
     WaitForVBlank();
     dmaCopyVram((u8 *)blockmap, 0x0000, 0x800);
+
+    waitReleased(KEY_START);
     for (;;)
     {
         pad0 = padsCurrent(0);
@@ -831,24 +1111,18 @@ void gameOverScreen(void)
         if (pad0 & KEY_START)
             break;
     }
-    gameState = ST_TITLE;
+    gameState = ST_HISCORES;
 }
 
 //---------------------------------------------------------------------------------
 int main(void)
 {
-    u16 i;
-
     setBrightness(0);
     WaitForVBlank();
 
     randSeed = 0xACE1;
-    for (i = 0; i < NUM_SCORES; i++)
-    {
-        hsScore[i] = 0;
-        hsName[i][0] = 'A'; hsName[i][1] = 'A'; hsName[i][2] = 'A'; hsName[i][3] = 0;
-    }
-    hiName[0] = 'A'; hiName[1] = 'A'; hiName[2] = 'A'; hiName[3] = 0;
+    newRank = NO_RANK;
+    loadHighScores();
     gameState = ST_TITLE;
 
     oamInitGfxSet(&gfxsprites, (&gfxsprites_end - &gfxsprites),

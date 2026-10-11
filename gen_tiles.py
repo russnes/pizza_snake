@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Generate tiles1.bmp: 8x8 BG tileset with a full hand-authored 5x7 pixel font
-(A-Z, 0-9), a wall tile, and a set of body-connector tiles used to render
+(A-Z, 0-9, plus '-' and '_'), a wall tile, and a set of body-connector tiles used to render
 the baked (permanent) portion of the snake's tail -- one for every possible
 combination of where the path enters and exits an 8x8 cell, so the baked
 tail matches the snake's actual path pixel-for-pixel instead of snapping
@@ -195,6 +195,9 @@ FONT5x7 = {
     'X': ["#...#", ".#.#.", "..#..", "..#..", "..#..", ".#.#.", "#...#"],
     'Y': ["#...#", "#...#", ".#.#.", "..#..", "..#..", "..#..", "..#.."],
     'Z': ["#####", "....#", "...#.", "..#..", ".#...", "#....", "#####"],
+    # punctuation: '-' marks empty high-score slots, '_' is the name-entry cursor
+    '-': [".....", ".....", ".....", "#####", ".....", ".....", "....."],
+    '_': [".....", ".....", ".....", ".....", ".....", ".....", "#####"],
 }
 CHARS = list(FONT5x7.keys())
 

@@ -12,8 +12,11 @@ homebrew devkit.
   background layer as the snake grows past the SNES's 128-sprite hardware
   limit — see "How the long tail works" below
 - Pizzas of two sizes/point values, randomly spawned
-- 20-entry high score table with on-screen name entry (A–Z, 3 letters)
-- Title screen, game-over screen, high-score screen
+- 20-entry high score table with on-screen name entry (8 characters: A–Z, 0–9
+  and space), **saved to battery-backed SRAM so it survives power-off**
+- After every game you land on the high score table (your new entry blinks);
+  it can also be opened from the title screen
+- Title screen, game-over screen, name-entry screen, high-score screen
 
 ## Directory contents
 
@@ -78,7 +81,36 @@ regeneration from the Python scripts).
 - **Start** — begin game / confirm on menus
 - **Select** — view high scores (from the title screen)
 - On the name-entry screen: **Left/Right** move the cursor, **Up/Down**
-  cycle the letter, **Start** confirms
+  cycle the character (hold to auto-repeat), **Start** confirms. The name
+  starts as `A` followed by spaces, so a short name needs no cleanup.
+- On the high score table: **Start**, **A** or **B** returns to the title
+
+## High scores and saving
+
+Scores are stored in the cartridge's battery-backed SRAM (declared in
+`hdr.asm`: `CARTRIDGETYPE $02`, `SRAMSIZE $01` = 2 KB; about 210 bytes are
+used). Emulators keep this in a `.srm` file next to the ROM (e.g.
+`pizzasnake.srm`); flashcarts such as the FXPak/SD2SNES read the SRAM size from
+the ROM header and keep it on the SD card.
+
+The save is written whenever a new high score is entered, and read once at
+power-on. Layout (see `saveHighScores()` in `psnake.c`):
+
+| Bytes     | Contents                                              |
+|-----------|-------------------------------------------------------|
+| 0–3       | magic `"PZSN"`                                        |
+| 4         | `NAME_LEN` (8)                                        |
+| 5         | `NUM_SCORES` (20)                                     |
+| 6–205     | 20 entries of: 8 name bytes, score low, score high    |
+| 206–207   | checksum of everything before it (low, high)          |
+
+If the SRAM is blank, corrupt, or was written with different `NAME_LEN` /
+`NUM_SCORES` values, the game starts with an empty table (and writes it back)
+rather than misreading the data. If no SRAM is available at all (e.g. a
+flashcart set up without it) the game still works; scores just last until
+power-off.
+
+To **reset the table**, delete the `.srm` file.
 
 ## How the long tail works
 
@@ -111,4 +143,6 @@ skipped crossing instead of leaving a gap.
 
 - No sound
 - No two-player mode
-- High scores don't persist across power-off (no SRAM save implemented)
+- No in-game option to clear the high score table (delete the `.srm` file)
+- A power cut in the instant the table is being written fails the checksum and
+  resets the table on the next boot
