@@ -139,6 +139,27 @@ case where the path clips a tile corner between two samples (skipping the
 cell that would normally connect them) is resolved by interpolating the
 skipped crossing instead of leaving a gap.
 
+## Performance notes (keeping 60 fps)
+
+The whole game step has to fit in one video frame (about 262 scanlines of CPU
+time). Two things burn that budget quickly on a 65816, and both are easy to
+reintroduce by accident:
+
+- **There is no divide (or hardware multiply) instruction.** A `u16 %` or `/`
+  is a software routine costing hundreds of cycles, and `s32` multiply/divide
+  is far worse. In per-frame code use masks and shifts instead
+  (`& TRAIL_MASK`, `>> 5`, `div10()`), and keep arithmetic 16-bit where the
+  values allow it. This is why `TRAILSIZE` **must be a power of two**.
+- **Cost scales with snake length.** `drawSprites()` and the self-collision
+  loop run once per body segment per frame (up to `SPRITE_WINDOW`).
+
+Before this was fixed, every `% TRAILSIZE`/`% 32` in the per-segment and
+per-tile paths, the 32-bit diagonal-tile maths, and the number formatting
+added up to more than one frame once the snake passed ~45 segments, and the
+game dropped to half speed for the rest of the round. The worst frame now
+uses roughly 225 of ~255 available scanlines with a long snake. If you add
+per-frame work, `lag_frame_counter` (pvsneslib) counts frames that overran.
+
 ## Known limitations
 
 - No sound

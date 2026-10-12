@@ -20,12 +20,20 @@ extern char palwalls, palwalls_end;
 #define ARENA_TOP    30
 #define ARENA_BOTTOM 210
 
-#define TRAILSIZE    1024
+#define TRAILSIZE    1024  /* MUST be a power of two: indices wrap with & TRAIL_MASK, not %.
+                               The 65816 has no divide instruction, so a u16 % is a slow
+                               software routine -- it used to run ~100x per frame and was
+                               what made the game drop to half speed past ~45 segments. */
+#define TRAIL_MASK   (TRAILSIZE - 1)
 #define MAX_LEN      3000  /* effectively unlimited; baking removes the OAM ceiling */
 #define SPRITE_WINDOW 55   /* most recent segments rendered as smooth sprites --
                                kept modest so per-frame sprite updates stay cheap;
                                everything beyond this is baked onto the BG layer */
 #define SEG_SPACING  2
+#define SEG_SHIFT    1     /* log2(SEG_SPACING): drawSprites() uses shifts, not divide/multiply */
+#if (1 << SEG_SHIFT) != SEG_SPACING
+#error SEG_SHIFT must equal log2(SEG_SPACING)
+#endif
 #define BAKE_STEP    1     /* sample the trail every frame for bake/erase
                                classification, finer than SEG_SPACING so
                                entry/exit points are captured precisely */
@@ -90,6 +98,7 @@ u8 gameState;
 u16 randSeed;
 u16 pad0;
 u8 hudDirty;
+u8 hudFull;               /* 1 = labels + hi score must be (re)drawn too, not just the score */
 u16 oamHighWater;
 u16 snakeAge;
 u16 nextBakeSample;
@@ -170,15 +179,33 @@ void writeText(u16 col, u16 row, const char *st)
 }
 
 //---------------------------------------------------------------------------------
+u16 div10(u16 n)
+{
+    /* n / 10 without a divide (shift-and-add, Hacker's Delight). Exhaustively
+       checked equal to n / 10 for all 65536 u16 values. The 65816 has no
+       divide instruction, so a real u16 / and % are slow software routines;
+       formatting the HUD used to do 20 of them in the one frame a pizza was
+       eaten, which on a long snake was enough to blow the frame budget. */
+    u16 q = (n >> 1) + (n >> 2);
+    u16 r;
+    q += q >> 4;
+    q += q >> 8;
+    q >>= 3;
+    r = n - ((q << 3) + (q << 1));   /* q * 10 */
+    return q + ((r + 6) >> 4);
+}
+
+//---------------------------------------------------------------------------------
 void writeNum(u16 col, u16 row, u16 num, u8 len)
 {
     u16 p = row * 32 + col + len - 1;
+    u16 q;
     u8 i;
     for (i = 0; i < len; i++)
     {
-        u8 figure = num % 10;
-        blockmap[p] = asciiTile[figure + '0'];
-        num /= 10;
+        q = div10(num);
+        blockmap[p] = asciiTile[(u8)(num - ((q << 3) + (q << 1))) + '0'];
+        num = q;
         p--;
     }
 }
@@ -268,6 +295,7 @@ void resetGame(void)
     score = 0;
     headIdx = 0;
     hudDirty = 1;
+    hudFull = 1;
     snakeAge = 0;
     nextBakeSample = 0;
     nextEraseSample = 0;
@@ -290,23 +318,33 @@ void resetGame(void)
 //---------------------------------------------------------------------------------
 void drawHud(void)
 {
-    /* "SCORE nnnnn  HI NAMENAME nnnnn" -- fills cols 1..30 of row 0 */
-    writeText(1, 0, "SCORE");
+    /* "SCORE nnnnn  HI NAMENAME nnnnn" -- fills cols 1..30 of row 0.
+       Only the score value changes during a game, so the labels and the
+       high score are drawn just once (hudFull, set by resetGame()); a pizza
+       then costs one number instead of the whole line. Text/number drawing
+       is slow on this CPU and this runs in the same frame as the pizza
+       respawn, so it matters. */
+    if (hudFull)
+    {
+        writeText(1, 0, "SCORE");
+        writeText(14, 0, "HI");
+        if (hsScore[0])
+            writeText(17, 0, hsName[0]);
+        writeNum(26, 0, hsScore[0], SCORE_DIGITS);
+        hudFull = 0;
+    }
     writeNum(7, 0, score, SCORE_DIGITS);
-    writeText(14, 0, "HI");
-    if (hsScore[0])
-        writeText(17, 0, hsName[0]);
-    writeNum(26, 0, hsScore[0], SCORE_DIGITS);
 }
 
 //---------------------------------------------------------------------------------
 void drawSprites(void)
 {
     u16 i;
-    u16 oamId;
     u16 hx, hy;
     u16 activeCount;
     u16 bodyCount;
+    u16 tIdx;
+    u8 *op;
 
     /* head: position only -- tile/attrs were set once in resetGame().
        Written directly into the OAM shadow buffer (auto-DMA'd at vblank by
@@ -341,24 +379,43 @@ void drawSprites(void)
         oamHighWater = activeCount;
     }
 
-    /* every active body segment: cheap position-only update each frame */
-    for (i = 0; i < bodyCount; i++)
+    /* every active body segment: cheap position-only update each frame.
+       Walks the trail backwards from the head one SEG_SPACING at a time
+       (rather than recomputing each index from scratch). */
+    tIdx = (headIdx - SEG_SPACING) & TRAIL_MASK;
+    op = &oamMemory[OAM_BODY0];
+    while (bodyCount)
     {
-        u16 tIdx = (headIdx + TRAILSIZE - (u16)((i + 1) * SEG_SPACING)) % TRAILSIZE;
-        oamId = OAM_BODY0 + i * 4;
-        oamMemory[oamId + 0] = (u8)(trailX[tIdx] - 4);
-        oamMemory[oamId + 1] = (u8)(trailY[tIdx] - 4);
+        /* One contiguous run of the ring buffer: from tIdx back toward index 0
+           in steps of SEG_SPACING. Pointer walking is much cheaper than
+           re-indexing the arrays every iteration on this compiler. */
+        u16 run = (tIdx >> SEG_SHIFT) + 1;   /* entries tIdx, tIdx-2, ... that stay >= 0 */
+        s16 *px, *py;
+        if (run > bodyCount)
+            run = bodyCount;
+        px = &trailX[tIdx];
+        py = &trailY[tIdx];
+        bodyCount -= run;
+        tIdx = (tIdx - (run << SEG_SHIFT)) & TRAIL_MASK;   /* wraps to the top of the buffer */
+        while (run--)
+        {
+            op[0] = (u8)(*px - 4);
+            op[1] = (u8)(*py - 4);
+            op += 4;
+            px -= SEG_SPACING;
+            py -= SEG_SPACING;
+        }
     }
 }
 
 //---------------------------------------------------------------------------------
-s32 abs32(s32 v)
+s16 abs16(s16 v)
 {
     return (v < 0) ? -v : v;
 }
 
 //---------------------------------------------------------------------------------
-s32 divRound(s32 num, s32 den)
+s16 divRound(s16 num, s16 den)
 {
     /* Round num/den to the nearest integer (ties away from zero) instead
        of truncating toward zero -- plain integer division here would bias
@@ -374,9 +431,21 @@ s32 divRound(s32 num, s32 den)
        expressions repeatedly after expansion -- which is exactly what
        blew up 816-tcc's stack-temporary count enough to overflow the
        assembler's 8-bit stack-relative addressing here. */
-    s32 aNum = abs32(num);
-    s32 aDen = abs32(den);
-    s32 mag = (aNum + aDen / 2) / aDen;
+    s16 aNum = abs16(num);
+    s16 aDen = abs16(den);
+    s16 mag;
+    /* This is all 16-bit on purpose: every value here is tiny (positions are
+       within a tile of each other, per-frame movement is at most 2 px, so
+       products stay under ~250 -- checked exhaustively against the old 32-bit
+       version over every reachable input), and a 32-bit multiply/divide is a
+       very slow software routine on the 65816. The denominator is a one-frame
+       movement delta, so it is nearly always 1 or 2 -- shifts, not a divide. */
+    if (aDen == 1)
+        mag = aNum;
+    else if (aDen == 2)
+        mag = (aNum + 1) >> 1;
+    else
+        mag = (aNum + aDen / 2) / aDen;
     return ((num < 0) == (den < 0)) ? mag : -mag;
 }
 
@@ -388,8 +457,8 @@ u8 axisDir(u16 fromCell, u16 toCell)
        this encoding pairs 0<->1 and 2<->3). Returns 0xFF if the two cells
        aren't simple axis neighbours (the path clipped a corner and
        stepped diagonally between samples). */
-    s16 dCol = (s16)(toCell % 32) - (s16)(fromCell % 32);
-    s16 dRow = (s16)(toCell / 32) - (s16)(fromCell / 32);
+    s16 dCol = (s16)(toCell & 31) - (s16)(fromCell & 31);   /* & 31 / >> 5 == % 32 / / 32 for u16, */
+    s16 dRow = (s16)(toCell >> 5) - (s16)(fromCell >> 5);   /* minus the slow software divide      */
     if (dCol == 1 && dRow == 0) return 1;  /* exits fromCell's right edge */
     if (dCol == -1 && dRow == 0) return 0; /* exits fromCell's left edge */
     if (dRow == 1 && dCol == 0) return 3;  /* exits fromCell's bottom edge */
@@ -425,7 +494,7 @@ u8 bakeSimpleCrossing(u16 pendingCell, u8 pendingEntryPoint, u16 cell, u8 d, u8 
 }
 
 //---------------------------------------------------------------------------------
-u8 interpAlong(u16 refCell, u8 d, s32 ax, s32 ay, s32 ddx, s32 ddy)
+u8 interpAlong(u16 refCell, u8 d, s16 ax, s16 ay, s16 ddx, s16 ddy)
 {
     /* Where the straight line from (ax,ay) to (ax+ddx,ay+ddy) crosses
        refCell's edge d, expressed as the local along-edge coordinate.
@@ -433,31 +502,31 @@ u8 interpAlong(u16 refCell, u8 d, s32 ax, s32 ay, s32 ddx, s32 ddy)
        to keep any single function's expression count -- and therefore its
        816-tcc stack-temporary usage -- small enough to fit an 8-bit
        stack-relative offset; see bakeDiagonalCrossing's comment. */
-    s32 b;
+    s16 b;
     if (d == 0 || d == 1)
     {
-        b = ((s32)(refCell % 32) + (d == 1 ? 1 : 0)) * 8;
+        b = ((s16)(refCell & 31) + (d == 1 ? 1 : 0)) * 8;
         if (ddx == 0) return (u8)((u16)ay & 7);
         return (u8)((u16)(ay + divRound((b - ax) * ddy, ddx)) & 7);
     }
-    b = ((s32)(refCell / 32) + (d == 3 ? 1 : 0)) * 8;
+    b = ((s16)(refCell >> 5) + (d == 3 ? 1 : 0)) * 8;
     if (ddy == 0) return (u8)((u16)ax & 7);
     return (u8)((u16)(ax + divRound((b - ay) * ddx, ddy)) & 7);
 }
 
 //---------------------------------------------------------------------------------
-u16 diagonalMidCell(u16 pendingCell, u16 cell, s32 ax, s32 ay, s32 ddx, s32 ddy)
+u16 diagonalMidCell(u16 pendingCell, u16 cell, s16 ax, s16 ay, s16 ddx, s16 ddy)
 {
     /* Which of the two cells diagonally between pendingCell and cell the
        straight line between the last two samples actually clipped
        through -- split out for the same stack-frame-size reason as
        interpAlong above. */
-    s16 dCol = (s16)(cell % 32) - (s16)(pendingCell % 32);
-    s16 dRow = (s16)(cell / 32) - (s16)(pendingCell / 32);
-    s32 colBoundary = ((s32)(pendingCell % 32) + (dCol > 0 ? 1 : 0)) * 8;
-    s32 rowBoundary = ((s32)(pendingCell / 32) + (dRow > 0 ? 1 : 0)) * 8;
-    s32 tCol = abs32(colBoundary - ax) * abs32(ddy);
-    s32 tRow = abs32(rowBoundary - ay) * abs32(ddx);
+    s16 dCol = (s16)(cell & 31) - (s16)(pendingCell & 31);
+    s16 dRow = (s16)(cell >> 5) - (s16)(pendingCell >> 5);
+    s16 colBoundary = ((s16)(pendingCell & 31) + (dCol > 0 ? 1 : 0)) * 8;
+    s16 rowBoundary = ((s16)(pendingCell >> 5) + (dRow > 0 ? 1 : 0)) * 8;
+    s16 tCol = abs16(colBoundary - ax) * abs16(ddy);
+    s16 tRow = abs16(rowBoundary - ay) * abs16(ddx);
     if (tCol < tRow)
         return (dCol > 0) ? (u16)(pendingCell + 1) : (u16)(pendingCell - 1);
     return (dRow > 0) ? (u16)(pendingCell + 32) : (u16)(pendingCell - 32);
@@ -479,8 +548,8 @@ u8 bakeDiagonalCrossing(u16 pendingCell, u8 pendingEntryPoint, u16 cell,
        8-bit stack-relative addressing the assembler needs -- keeping each
        function's own expression count small avoids that regardless of
        how much total work the whole crossing needs. */
-    s32 ax = (s32)prevX, ay = (s32)prevY;
-    s32 ddx = (s32)curX - ax, ddy = (s32)curY - ay;
+    s16 ax = (s16)prevX, ay = (s16)prevY;
+    s16 ddx = (s16)curX - ax, ddy = (s16)curY - ay;
     u16 midCell = diagonalMidCell(pendingCell, cell, ax, ay, ddx, ddy);
     u8 d1 = axisDir(pendingCell, midCell);
     u8 along1 = interpAlong(pendingCell, d1, ax, ay, ddx, ddy);
@@ -519,15 +588,18 @@ u8 stepSnake(void)
     if (pad0 & KEY_RIGHT)
         angle -= TURN_RATE;
 
-    dx = ((s32)cosTable[angle] * MOVESPEED) >> 7;
-    dy = -(((s32)sinTable[angle] * MOVESPEED) >> 7);
+    /* 16-bit multiply on purpose: |table| <= 128 and MOVESPEED = 210 give at
+       most 26880, which fits in 16 bits -- and a 32-bit multiply is a slow
+       software routine on the 65816 (2 of them ran every single frame) */
+    dx = (cosTable[angle] * MOVESPEED) >> 7;
+    dy = -((sinTable[angle] * MOVESPEED) >> 7);
     posX += dx;
     posY += dy;
 
     hx = (u16)(posX >> 7);
     hy = (u16)(posY >> 7);
 
-    headIdx = (headIdx + 1) % TRAILSIZE;
+    headIdx = (headIdx + 1) & TRAIL_MASK;
     trailX[headIdx] = hx;
     trailY[headIdx] = hy;
     snakeAge++;
@@ -564,7 +636,7 @@ u8 stepSnake(void)
             u8 guard = 12; /* defensive cap: never more than a handful of ops/frame */
             while ((s32)nextBakeSample <= bakeThreshold && guard--)
             {
-                u16 bIdx = nextBakeSample % TRAILSIZE;
+                u16 bIdx = nextBakeSample & TRAIL_MASK;
                 u16 bx = (u16)trailX[bIdx];
                 u16 by = (u16)trailY[bIdx];
                 u16 cell = (by >> 3) * 32 + (bx >> 3);
@@ -599,7 +671,7 @@ u8 stepSnake(void)
             guard = 12;
             while ((s32)nextEraseSample <= eraseThreshold && guard--)
             {
-                u16 eIdx = nextEraseSample % TRAILSIZE;
+                u16 eIdx = nextEraseSample & TRAIL_MASK;
                 u16 ex = (u16)trailX[eIdx];
                 u16 ey = (u16)trailY[eIdx];
                 u16 cell = (ey >> 3) * 32 + (ex >> 3);
@@ -619,8 +691,8 @@ u8 stepSnake(void)
                     if (lastErasedCell != 0xFFFF && axisDir(lastErasedCell, cell) == 0xFF)
                     {
                         u16 midCell = diagonalMidCell(lastErasedCell, cell,
-                                                       (s32)prevEraseX, (s32)prevEraseY,
-                                                       (s32)ex - (s32)prevEraseX, (s32)ey - (s32)prevEraseY);
+                                                       (s16)prevEraseX, (s16)prevEraseY,
+                                                       (s16)ex - (s16)prevEraseX, (s16)ey - (s16)prevEraseY);
                         blockmap[midCell] = TILE_BLANK;
                         if (dirtyCount < MAX_DIRTY)
                             dirtyCell[dirtyCount++] = midCell;
@@ -650,15 +722,17 @@ u8 stepSnake(void)
         if (maxCheck > SPRITE_WINDOW)
             maxCheck = SPRITE_WINDOW;
 
+        u16 tIdx = (headIdx - SELF_SKIP * SEG_SPACING) & TRAIL_MASK;
         for (i = SELF_SKIP; i < maxCheck; i += 2)
         {
-            u16 tIdx = (headIdx + TRAILSIZE - (u16)(i * SEG_SPACING)) % TRAILSIZE;
-            s16 adx = hx - trailX[tIdx];
-            s16 ady = hy - trailY[tIdx];
-            if (adx < 0) adx = -adx;
-            if (ady < 0) ady = -ady;
-            if (adx < SELF_R && ady < SELF_R)
+            /* |dx| < SELF_R && |dy| < SELF_R, written as one unsigned compare per
+               axis: (u16)(d + SELF_R - 1) < 2*SELF_R - 1 is true exactly when
+               -SELF_R < d < SELF_R. Same result as abs(), without the branches. */
+            u16 adx = (u16)(hx - trailX[tIdx] + (SELF_R - 1));
+            u16 ady = (u16)(hy - trailY[tIdx] + (SELF_R - 1));
+            if (adx < (2 * SELF_R - 1) && ady < (2 * SELF_R - 1))
                 return 1; /* self collision */
+            tIdx = (tIdx - 2 * SEG_SPACING) & TRAIL_MASK; /* next sample: i += 2 */
         }
     }
 
