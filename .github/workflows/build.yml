@@ -7,10 +7,12 @@ on:
     branches: [ main, master ]
   workflow_dispatch:
 
+permissions:
+  contents: write   # required to create releases + upload assets
+
 jobs:
   build:
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -49,15 +51,12 @@ jobs:
           PVSNESLIB_HOME: ${{ github.workspace }}/pvsneslib_install/pvsneslib
         run: |
           export PATH="$PATH:$PVSNESLIB_HOME/devkitsnes/bin"
-
           # Clean previous attempt
           make clean || true
-
           # Patch the rules so .ps is used directly instead of going through 816-opt
           # (avoids the "Out of 8-bit range" assembler error)
           sed -i 's|816-opt \$\*.ps >\$\*.asp|cp $*.ps $*.asp|' \
             "$PVSNESLIB_HOME/devkitsnes/snes_rules"
-
           make
 
       - name: Upload ROM artifact
@@ -80,3 +79,25 @@ jobs:
             *.obj
             Makefile
           if-no-files-found: ignore
+
+      # ────────────────────────────────────────────────
+      # Create a GitHub Release + attach the ROM
+      # Only on push to main/master or manual trigger
+      # ────────────────────────────────────────────────
+      - name: Create GitHub Release
+        if: github.event_name != 'pull_request' && success()
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: Pizza Snake – Build ${{ github.run_number }}
+          body: |
+            Automated build from commit `${{ github.sha }}`
+            
+            - Branch: `${{ github.ref_name }}`
+            - Workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+            
+            Download the ROM below ⬇️
+          files: pizzasnake.sfc
+          draft: false
+          prerelease: false
+          generate_release_notes: true
