@@ -1219,6 +1219,12 @@ int main(void)
 
     hideAllSprites();
     setScreenOn();
+    /* The SNES starts drawing one line *into* the background: with a vertical
+       scroll of 0, tilemap pixel row 0 is never shown and everything sits 1px
+       too high -- which clipped the top stroke off the HUD text on tile row 0.
+       A scroll of -1 puts tilemap row N on screen line N, matching the pixel
+       coordinates the sprites and tile lookups already use. */
+    bgSetScroll(0, 0, 0xFFFF);
 
     for (;;)
     {
