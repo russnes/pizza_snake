@@ -15,10 +15,35 @@ extern char palwalls, palwalls_end;
 
 //---------------------------------------------------------------------------------
 // Arena bounds (pixel space)
-#define ARENA_LEFT   14
-#define ARENA_RIGHT  242
-#define ARENA_TOP    30
-#define ARENA_BOTTOM 210
+//
+// The walls are a ring of 8x8 tiles (tilemap rows 2 and 27, columns 0 and 31 --
+// see drawWalls()), so the playable interior is x 8..247, y 24..215. The head,
+// like every body segment, is a 5x5 dot reaching HEAD_R = 2px out from its
+// centre in each direction, and it's the head's *centre* that is tested against
+// the ARENA_* bounds. Letting the centre go to (interior edge + HEAD_R) puts
+// the dot's outer edge flush against the visible wall; one pixel further would
+// overlap it, and that is when the snake dies. (These used to be 14/242/30/210,
+// which killed the snake 3-4px before it visibly reached the wall.)
+//
+// Because the bounds stay inside the interior, the head's tile is never a wall
+// tile, so baking the tail can never overwrite (or erase) a wall.
+#define PLAY_LEFT    8
+#define PLAY_RIGHT   247
+#define PLAY_TOP     24
+#define PLAY_BOTTOM  215
+#define HEAD_R       2
+#define ARENA_LEFT   (PLAY_LEFT + HEAD_R)
+#define ARENA_RIGHT  (PLAY_RIGHT - HEAD_R)
+#define ARENA_TOP    (PLAY_TOP + HEAD_R)
+#define ARENA_BOTTOM (PLAY_BOTTOM - HEAD_R)
+
+/* Pizzas spawn in the region they always have (kept clear of the walls for the
+   16x16 big pizza); deliberately NOT tied to the death bounds above, so fixing
+   the walls doesn't move pizzas or change the random sequence. */
+#define SPAWN_LEFT   14
+#define SPAWN_RIGHT  242
+#define SPAWN_TOP    30
+#define SPAWN_BOTTOM 210
 
 #define TRAILSIZE    1024  /* MUST be a power of two: indices wrap with & TRAIL_MASK, not %.
                                The 65816 has no divide instruction, so a u16 % is a slow
@@ -263,8 +288,8 @@ void hideAllSprites(void)
 void spawnPizza(void)
 {
     u16 r;
-    pizzaX = ARENA_LEFT + 8 + (nextRand() % (ARENA_RIGHT - ARENA_LEFT - 16));
-    pizzaY = ARENA_TOP + 8 + (nextRand() % (ARENA_BOTTOM - ARENA_TOP - 16));
+    pizzaX = SPAWN_LEFT + 8 + (nextRand() % (SPAWN_RIGHT - SPAWN_LEFT - 16));
+    pizzaY = SPAWN_TOP + 8 + (nextRand() % (SPAWN_BOTTOM - SPAWN_TOP - 16));
 
     r = nextRand() % 10;
     if (r < 3)
