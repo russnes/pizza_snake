@@ -17,20 +17,28 @@ extern char palwalls, palwalls_end;
 // Arena bounds (pixel space)
 //
 // The walls are a ring of 8x8 tiles (tilemap rows 2 and 27, columns 0 and 31 --
-// see drawWalls()), so the playable interior is x 8..247, y 24..215. The head,
-// like every body segment, is a 5x5 dot reaching HEAD_R = 2px out from its
-// centre in each direction, and it's the head's *centre* that is tested against
-// the ARENA_* bounds. Letting the centre go to (interior edge + HEAD_R) puts
-// the dot's outer edge flush against the visible wall; one pixel further would
-// overlap it, and that is when the snake dies. (These used to be 14/242/30/210,
-// which killed the snake 3-4px before it visibly reached the wall.)
+// see drawWalls()), so the tile interior is x 8..247, y 24..215. Every wall tile
+// has a 1px near-black outline on all four sides (41,16,16 against the 8,8,8
+// floor): effectively invisible, so the wall *looks* 1px thinner than it is.
+// That innermost outline pixel is therefore treated as free space (WALL_BORDER),
+// and the snake only dies when it would overlap the bright part of the wall.
 //
-// Because the bounds stay inside the interior, the head's tile is never a wall
-// tile, so baking the tail can never overwrite (or erase) a wall.
-#define PLAY_LEFT    8
-#define PLAY_RIGHT   247
-#define PLAY_TOP     24
-#define PLAY_BOTTOM  215
+// The head, like every body segment, is a 5x5 dot reaching HEAD_R = 2px out from
+// its centre in each direction, and it's the head's *centre* that is tested
+// against the ARENA_* bounds. Letting the centre go to (free edge + HEAD_R) puts
+// the dot's outer edge exactly on the last free pixel; one pixel further would
+// overlap the visible wall, and that is when the snake dies. (These were
+// 14/242/30/210 originally, which killed the snake 3-4px before it visibly
+// reached the wall.)
+//
+// The bounds still keep the head's centre inside the tile interior (x 8..247,
+// y 24..215), so the head's tile is never a wall tile and baking the tail can
+// never overwrite (or erase) a wall.
+#define WALL_BORDER  1
+#define PLAY_LEFT    (8 - WALL_BORDER)
+#define PLAY_RIGHT   (247 + WALL_BORDER)
+#define PLAY_TOP     (24 - WALL_BORDER)
+#define PLAY_BOTTOM  (215 + WALL_BORDER)
 #define HEAD_R       2
 #define ARENA_LEFT   (PLAY_LEFT + HEAD_R)
 #define ARENA_RIGHT  (PLAY_RIGHT - HEAD_R)
