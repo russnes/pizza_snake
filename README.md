@@ -7,10 +7,10 @@ homebrew devkit.
 ## Features
 
 - Continuous, angle-based movement (turn left/right, not grid-based Snake)
-- Effectively unlimited snake length: the most recent ~55 segments are
+- Effectively unlimited snake length: the most recent 30 segments are
   smooth-moving sprites, and everything older is permanently baked onto the
-  background layer as the snake grows past the SNES's 128-sprite hardware
-  limit — see "How the long tail works" below
+  background layer as the snake grows past the SNES's sprite limits — see
+  "How the long tail works" below
 - Pizzas of two sizes/point values, randomly spawned
 - 20-entry high score table with on-screen name entry (8 characters: A–Z, 0–9
   and space), **saved to battery-backed SRAM so it survives power-off**
@@ -114,10 +114,11 @@ To **reset the table**, delete the `.srm` file.
 
 ## How the long tail works
 
-The SNES can only display 128 hardware sprites at once, so a snake that's
-allowed to grow indefinitely can't be *all* sprites forever. The most recent
-~55 segments (nearest the head) are rendered as sprites and move smoothly
-every frame. Once a segment ages further back than that, it's permanently
+The SNES can only display 128 hardware sprites at once -- and, more
+restrictively, only **32 on any one scanline** -- so a snake that's allowed to
+grow indefinitely can't be *all* sprites forever. The most recent 30 segments
+(nearest the head) are rendered as sprites and move smoothly every frame
+(`SPRITE_WINDOW`). Once a segment ages further back than that, it's permanently
 "baked" onto the background tilemap — and since the snake's length only
 changes when it eats (not with distance travelled), the *oldest* baked
 segment is erased at the same rate new ones are added, keeping the total
@@ -150,14 +151,27 @@ reintroduce by accident:
   is far worse. In per-frame code use masks and shifts instead
   (`& TRAIL_MASK`, `>> 5`, `div10()`), and keep arithmetic 16-bit where the
   values allow it. This is why `TRAILSIZE` **must be a power of two**.
-- **Cost scales with snake length.** `drawSprites()` and the self-collision
-  loop run once per body segment per frame (up to `SPRITE_WINDOW`).
+- **Cost scales with snake length.** `drawSprites()` runs once per body sprite
+  per frame (`SPRITE_WINDOW`) and the self-collision loop once per segment
+  (`COLLIDE_WINDOW`).
+- **The 32-sprites-per-scanline limit is a hard cap, not a hint.** A long snake
+  running horizontally puts *every* body sprite on the same scanlines; past 32
+  the PPU silently drops the highest-numbered ones (the oldest segments), and
+  which ones it drops changes as the snake's shape does -- a hole that
+  flickers. Real hardware and accurate emulators (bsnes) do this; a lenient
+  emulator may not, which can hide the problem. So `SPRITE_WINDOW + head +
+  pizza <= 32` is checked at compile time: it can't be exceeded whatever shape
+  the snake makes. Collisions deliberately use a *separate* window
+  (`COLLIDE_WINDOW`), so dying doesn't depend on how many sprites we can draw.
+  Baking starts `SPRITE_OVERLAP` segments before the sprites run out, because
+  sprites sit behind BG tiles and the overlap hides the lag in writing the
+  newest baked tile.
 
 Before this was fixed, every `% TRAILSIZE`/`% 32` in the per-segment and
 per-tile paths, the 32-bit diagonal-tile maths, and the number formatting
 added up to more than one frame once the snake passed ~45 segments, and the
 game dropped to half speed for the rest of the round. The worst frame now
-uses roughly 225 of ~255 available scanlines with a long snake. If you add
+uses roughly 190 of ~257 available scanlines with a long snake. If you add
 per-frame work, `lag_frame_counter` (pvsneslib) counts frames that overran.
 
 ## Known limitations

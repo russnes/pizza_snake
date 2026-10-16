@@ -59,10 +59,43 @@ extern char palwalls, palwalls_end;
                                what made the game drop to half speed past ~45 segments. */
 #define TRAIL_MASK   (TRAILSIZE - 1)
 #define MAX_LEN      3000  /* effectively unlimited; baking removes the OAM ceiling */
-#define SPRITE_WINDOW 55   /* most recent segments rendered as smooth sprites --
-                               kept modest so per-frame sprite updates stay cheap;
-                               everything beyond this is baked onto the BG layer */
+/* The SNES draws at most 32 sprites on any one scanline, and a long snake
+   running horizontally puts *every* body sprite on the same scanlines. Past 32
+   the PPU silently drops the highest-numbered sprites (here: the oldest
+   segments) -- a hole in the snake that appears, vanishes and flickers as the
+   shape changes, on real hardware and accurate emulators (a lenient emulator
+   may hide it). So the sprite budget must be a hard guarantee, not a hope:
+   head + pizza + SPRITE_WINDOW body sprites <= 32, whatever the snake's shape. */
+#define SPRITE_WINDOW 30   /* most recent segments rendered as smooth sprites; everything
+                               older is baked onto the BG layer (see stepSnake()) */
+#if SPRITE_WINDOW + 2 > 32
+#error SPRITE_WINDOW + head + pizza must be <= 32 (hardware limit: sprites per scanline)
+#endif
+/* What decides whether the snake *dies* is deliberately independent of how many
+   sprites we can afford to draw: self-collision by sample position covers this
+   many segments, and the coarse baked-tile test only applies past this length.
+   (This is what SPRITE_WINDOW used to mean, so collisions behave as they always did.) */
+#define COLLIDE_WINDOW 55
+#if SPRITE_WINDOW > COLLIDE_WINDOW
+#error SPRITE_WINDOW must not exceed COLLIDE_WINDOW
+#endif
 #define SEG_SPACING  2
+/* The newest baked tile can't be written until the path has left its cell, so
+   it trails the point where the sprites end by up to a tile (8px, 11 on the
+   diagonal) -- which showed as a gap at the hand-off that opened and closed as
+   the cursor crossed cells. Body sprites sit *behind* the BG tiles, so baking
+   starts SPRITE_OVERLAP segments before the sprites run out: the opaque tile
+   simply covers the identical-looking sprite beneath it and the lag is hidden.
+   (4 segments = 8 samples = ~13px, more than a tile's diagonal.) */
+#define SPRITE_OVERLAP  4
+#define BAKE_SAMPLES    ((SPRITE_WINDOW - SPRITE_OVERLAP) * SEG_SPACING)    /* trail samples this old are baked into the BG */
+#define COLLIDE_SAMPLES (COLLIDE_WINDOW * SEG_SPACING)   /* ...but still collide by sample position until this old */
+/* A tile baked from a sample at age s is written at s + BAKE_SAMPLES, but the
+   old (all-sprite-window = 55) logic only wrote it at s + COLLIDE_SAMPLES -- and
+   the coarse whole-cell collision test has always only applied from then on.
+   So a tile counts as solid to that test only once it's been in the map for
+   EARLY_BAKE_STEPS; before that, the precise sample-position check governs. */
+#define EARLY_BAKE_STEPS (COLLIDE_SAMPLES - BAKE_SAMPLES)
 #define SEG_SHIFT    1     /* log2(SEG_SPACING): drawSprites() uses shifts, not divide/multiply */
 #if (1 << SEG_SHIFT) != SEG_SPACING
 #error SEG_SHIFT must equal log2(SEG_SPACING)
@@ -180,6 +213,7 @@ u8 nameCursor;
 u16 hsScore[NUM_SCORES];
 char hsName[NUM_SCORES][NAME_LEN + 1];
 u8 newRank;               /* table slot of the score just entered, or NO_RANK */
+u16 cellBakedAt[1024];    /* snakeAge at which each cell's body tile was last written (see EARLY_BAKE_STEPS) */
 u8 saveBuf[SAVE_SIZE];    /* staging buffer for SRAM reads/writes */
 
 //---------------------------------------------------------------------------------
@@ -506,6 +540,11 @@ void finalizeTile(u16 cell, u8 entryPoint, u8 exitPoint)
        every one of the 32x32 possible touch-point combinations, so
        there's no case analysis left to do here -- just look up the tile
        that was pre-built for this exact pair. */
+    u16 prev = blockmap[cell] & 0x3FF;
+    if (prev < TILE_BODY_BASE || prev >= TILE_BODY_BASE + TILE_BODY_COUNT)
+        cellBakedAt[cell] = snakeAge; /* stamp only the FIRST tile since the cell was last empty: the cell
+                                         turned solid when its oldest tail got baked, and a newer pass through
+                                         the same cell must not make an older one look young */
     blockmap[cell] = tailConnectorTile[(u16)entryPoint * 32 + exitPoint];
     if (dirtyCount < MAX_DIRTY)
         dirtyCell[dirtyCount++] = cell;
@@ -654,7 +693,7 @@ u8 stepSnake(void)
        positions already overwritten in the circular trail buffer and bake
        tiles at garbage locations). */
     {
-        s32 bakeThreshold = (s32)snakeAge - (s32)SPRITE_WINDOW * SEG_SPACING;
+        s32 bakeThreshold = (s32)snakeAge - (s32)BAKE_SAMPLES;
         s32 eraseThreshold = (s32)snakeAge - (s32)curLen * SEG_SPACING;
 
         if (curLen <= SPRITE_WINDOW)
@@ -742,8 +781,8 @@ u8 stepSnake(void)
         }
     }
 
-    /* cheap abs-based self collision against the sprite-rendered window,
-       sampling every other segment. Never look further back than the snake
+    /* cheap abs-based self collision against the most recent COLLIDE_WINDOW
+       segments, sampling every other segment. Never look further back than the snake
        has actually been alive for, or we'd read the trail buffer's initial
        spawn-point stub data and get a false "collision" near the start of
        a life. */
@@ -752,8 +791,8 @@ u8 stepSnake(void)
         u16 ageLimit = snakeAge / SEG_SPACING;
         if (ageLimit < maxCheck)
             maxCheck = ageLimit;
-        if (maxCheck > SPRITE_WINDOW)
-            maxCheck = SPRITE_WINDOW;
+        if (maxCheck > COLLIDE_WINDOW)
+            maxCheck = COLLIDE_WINDOW;
 
         u16 tIdx = (headIdx - SELF_SKIP * SEG_SPACING) & TRAIL_MASK;
         for (i = SELF_SKIP; i < maxCheck; i += 2)
@@ -774,11 +813,12 @@ u8 stepSnake(void)
        contiguous block of tile indices starting at TILE_BODY_BASE, so
        "is this cell solid" is a single range check regardless of which
        of the many connector shapes it happens to be. */
-    if (curLen > SPRITE_WINDOW)
+    if (curLen > COLLIDE_WINDOW)
     {
         u16 cell = (hy >> 3) * 32 + (hx >> 3);
         u16 t = blockmap[cell] & 0x3FF; /* mask off flip bits */
-        if (t >= TILE_BODY_BASE && t < TILE_BODY_BASE + TILE_BODY_COUNT)
+        if (t >= TILE_BODY_BASE && t < TILE_BODY_BASE + TILE_BODY_COUNT
+            && (u16)(snakeAge - cellBakedAt[cell]) >= EARLY_BAKE_STEPS)
             return 1;
     }
 
