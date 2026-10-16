@@ -1,0 +1,8 @@
+[objects]
+psnake.obj
+data.obj
+hdr.obj
+/home/workdir/pvsneslib_install/pvsneslib/pvsneslib/lib/LoROM_SlowROM/crt0_snes.obj
+/home/workdir/pvsneslib_install/pvsneslib/pvsneslib/lib/LoROM_SlowROM/libc.obj
+/home/workdir/pvsneslib_install/pvsneslib/pvsneslib/lib/LoROM_SlowROM/libm.obj
+/home/workdir/pvsneslib_install/pvsneslib/pvsneslib/lib/LoROM_SlowROM/libtcc.obj

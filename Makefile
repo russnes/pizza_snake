@@ -34,4 +34,8 @@ tiles1.pic: tiles1.bmp
 	@echo convert bitmap ... $(notdir $@)
 	$(GFXCONV) -s 8 -o 16 -u 16 -t bmp -i $<
 
-bitmaps : sprites.pic tiles1.pic trig_table.h sprite_tiles.h tiles_charmap.h
+splash.pic splash.map splash.pal: splash.bmp
+	@echo convert splash bitmap ... $(notdir $@)
+	$(GFXCONV) -s 8 -o 16 -u 16 -p -m -R -t bmp -i $<
+
+bitmaps : sprites.pic tiles1.pic splash.pic trig_table.h sprite_tiles.h tiles_charmap.h

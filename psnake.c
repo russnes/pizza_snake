@@ -12,6 +12,9 @@ extern char gfxsprites, gfxsprites_end;
 extern char palsprites, palsprites_end;
 extern char gfxwalls, gfxwalls_end;
 extern char palwalls, palwalls_end;
+extern char gfxsplash, gfxsplash_end;
+extern char palsplash, palsplash_end;
+extern char mapsplash, mapsplash_end;
 
 //---------------------------------------------------------------------------------
 // Arena bounds (pixel space)
@@ -1262,8 +1265,67 @@ void gameOverScreen(void)
 }
 
 //---------------------------------------------------------------------------------
+/* Full-screen splash using the Pizza Worm title art.
+   Fades in, waits for Start, then fades out before the normal title. */
+void splashScreen(void)
+{
+    /* Force the screen completely off / black while we load everything.
+       This prevents any unfaded frame from appearing at ROM boot. */
+    setScreenOff();
+    setBrightness(0);
+
+    dmaCopyVram(&gfxsplash, 0x1000, (&gfxsplash_end - &gfxsplash));
+    dmaCopyVram(&mapsplash, 0x0000, (&mapsplash_end - &mapsplash));
+    dmaCopyCGram((u8 *)&palsplash, 0, (&palsplash_end - &palsplash));
+
+    bgSetGfxPtr(0, 0x1000);
+    bgSetMapPtr(0, 0x0000, SC_32x32);
+    bgSetScroll(0, 0, 0);          /* map row 0 on screen row 0 for the art */
+
+    setMode(BG_MODE1, 0);
+    bgSetDisable(1);
+    bgSetDisable(2);
+    hideAllSprites();
+
+    /* Enable the screen while still at brightness 0.  setScreenOn() may
+       internally touch INIDISP, so we re-assert brightness 0 immediately
+       afterwards and wait a couple of VBlanks so the first visible frame
+       is pure black.  Only then do we start the fade-in. */
+    setScreenOn();
+    setBrightness(0);
+    WaitForVBlank();
+    setBrightness(0);
+    WaitForVBlank();
+    setBrightness(0);
+
+    setFadeEffectEx(FADE_IN, 12);
+
+    waitReleased(KEY_START);
+    for (;;)
+    {
+        pad0 = padsCurrent(0);
+        WaitForVBlank();
+        if (pad0 & KEY_START)
+            break;
+    }
+
+    /* Fade back to black, then the caller reloads the game graphics */
+    setFadeEffectEx(FADE_OUT, 12);
+    /* Wait for the fade to finish so we don't tear when overwriting VRAM. */
+    {
+        u8 i;
+        for (i = 0; i < 14; i++)
+            WaitForVBlank();
+    }
+    setBrightness(0);
+    setScreenOff();
+}
+
+//---------------------------------------------------------------------------------
 int main(void)
 {
+    /* Start completely dark / blank so nothing flashes before the splash. */
+    setScreenOff();
     setBrightness(0);
     WaitForVBlank();
 
@@ -1272,6 +1334,10 @@ int main(void)
     loadHighScores();
     gameState = ST_TITLE;
 
+    /* Initial splash screen (fades in / out on Start) */
+    splashScreen();
+
+    /* Now load the real game graphics (overwrites the splash tiles/map) */
     oamInitGfxSet(&gfxsprites, (&gfxsprites_end - &gfxsprites),
                    &palsprites, (&palsprites_end - &palsprites),
                    0, 0x4000, OBJ_SIZE8_L16);
@@ -1291,13 +1357,17 @@ int main(void)
     bgSetDisable(2);
 
     hideAllSprites();
-    setScreenOn();
     /* The SNES starts drawing one line *into* the background: with a vertical
        scroll of 0, tilemap pixel row 0 is never shown and everything sits 1px
        too high -- which clipped the top stroke off the HUD text on tile row 0.
        A scroll of -1 puts tilemap row N on screen line N, matching the pixel
        coordinates the sprites and tile lookups already use. */
     bgSetScroll(0, 0, 0xFFFF);
+
+    /* Screen was left black by the splash fade-out.  Jump straight to full
+       brightness with no second fade-in. */
+    setBrightness(15);
+    setScreenOn();
 
     for (;;)
     {
