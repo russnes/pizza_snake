@@ -17,6 +17,7 @@ homebrew devkit.
 - After every game you land on the high score table (your new entry blinks);
   it can also be opened from the title screen
 - Title screen, game-over screen, name-entry screen, high-score screen
+- Continuous background music (starts on boot, loops forever)
 
 ## Directory contents
 
@@ -174,9 +175,37 @@ game dropped to half speed for the rest of the round. The worst frame now
 uses roughly 190 of ~257 available scanlines with a long snake. If you add
 per-frame work, `lag_frame_counter` (pvsneslib) counts frames that overran.
 
+## Music
+
+Background music plays continuously from the moment the ROM boots (right after
+the SPC700 driver is initialised) and loops for the entire session.
+
+The music is supplied as an Impulse Tracker module (`res/pizza_music.it`) and
+converted at build time by pvsneslib’s `smconv` tool into a soundbank that the
+SM-SPC driver streams to the SPC700.
+
+The supplied WAV (`pizza_snake_full_structure.wav`) is the definitive reference
+recording of the intended piece (100 BPM, A-minor centred, with the formal
+structure described in the project notes: Intro → A → A' → B → C → Link → A
+and seamless loop).  To replace the placeholder module with a faithful
+reproduction:
+
+1. Open the WAV (or recreate the progression) in a tracker that can export
+   Impulse Tracker modules (Schism Tracker, OpenMPT, etc.).
+2. Build instruments/samples that fit the SNES sample budget (BRR, typically
+   a few short loops + percussion).
+3. Sequence the exact form and chord progression given in the structure table.
+4. Export as `res/pizza_music.it` (Instruments mode, not Samples-only) and
+   rebuild the ROM.
+
+The current placeholder is the stock “pollen8” example so that the audio
+pipeline is fully wired and the game already has continuous music; swap the
+IT file for the real arrangement when ready.
+
 ## Known limitations
 
-- No sound
+- Music is a placeholder module (see Music section above); the definitive
+  arrangement lives in the supplied WAV and still needs to be tracked.
 - No two-player mode
 - No in-game option to clear the high score table (delete the `.srm` file)
 - A power cut in the instant the table is being written fails the checksum and

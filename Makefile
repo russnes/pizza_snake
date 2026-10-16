@@ -2,16 +2,23 @@ ifeq ($(strip $(PVSNESLIB_HOME)),)
 $(error "Please create an environment variable PVSNESLIB_HOME by following this guide: https://github.com/alekmaul/pvsneslib/wiki/Installation")
 endif
 
+# list in AUDIOFILES all your .it files in the right order. It will build to generate soundbank file
+AUDIOFILES := res/pizza_music.it
+# then define the path to generate soundbank data
+export SOUNDBANK := res/soundbank
+# soundbank conversion flags
+SMCONVFLAGS := -s -o $(SOUNDBANK) -V -b 5
+
 include ${PVSNESLIB_HOME}/devkitsnes/snes_rules
 
-.PHONY: bitmaps all
+.PHONY: bitmaps all musics
 
 #---------------------------------------------------------------------------------
 export ROMNAME := pizzasnake
 
-all: bitmaps $(ROMNAME).sfc
+all: bitmaps musics $(ROMNAME).sfc
 
-clean: cleanBuildRes cleanRom cleanGfx
+clean: cleanBuildRes cleanRom cleanGfx cleanAudio
 
 #---------------------------------------------------------------------------------
 sprites.bmp sprite_tiles.h: gen_sprites.py
@@ -39,3 +46,5 @@ splash.pic splash.map splash.pal: splash.bmp
 	$(GFXCONV) -s 8 -o 16 -u 16 -p -m -R -t bmp -i $<
 
 bitmaps : sprites.pic tiles1.pic splash.pic trig_table.h sprite_tiles.h tiles_charmap.h
+
+musics: $(SOUNDBANK).asm

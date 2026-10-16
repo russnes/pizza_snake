@@ -7,6 +7,9 @@
 #include "trig_table.h"
 #include "tiles_charmap.h"
 #include "sprite_tiles.h"
+#include "res/soundbank.h"
+
+extern char SOUNDBANK__;
 
 extern char gfxsprites, gfxsprites_end;
 extern char palsprites, palsprites_end;
@@ -15,6 +18,14 @@ extern char palwalls, palwalls_end;
 extern char gfxsplash, gfxsplash_end;
 extern char palsplash, palsplash_end;
 extern char mapsplash, mapsplash_end;
+
+/* Helper that keeps the SPC700 music engine fed and then waits for VBlank.
+   Must be called every frame or the music will stutter / stop. */
+static void waitVBlank(void)
+{
+    spcProcess();
+    WaitForVBlank();
+}
 
 //---------------------------------------------------------------------------------
 // Arena bounds (pixel space)
@@ -301,7 +312,7 @@ void waitReleased(u16 mask)
        waited on, so holding a d-pad direction from the moment of death
        doesn't stall anything. */
     while (padsCurrent(0) & mask)
-        WaitForVBlank();
+        waitVBlank();
 }
 
 //---------------------------------------------------------------------------------
@@ -1094,7 +1105,7 @@ void nameEntryScreen(void)
 
         drawNameRow(15, (frameCount >> 4) & 1);
 
-        WaitForVBlank();
+        waitVBlank();
         dmaCopyVram((u8 *)blockmap, 0x0000, 0x800);
         frameCount++;
 
@@ -1152,7 +1163,7 @@ void hiScoresScreen(void)
     for (i = 0; i < NUM_SCORES; i++)
         drawScoreRow(i, 1);
     writeText(10, 26, "PRESS START");
-    WaitForVBlank();
+    waitVBlank();
     dmaCopyVram((u8 *)blockmap, 0x0000, 0x800);
 
     waitReleased(KEY_START | KEY_A | KEY_B);
@@ -1173,7 +1184,7 @@ void hiScoresScreen(void)
             }
         }
 
-        WaitForVBlank();
+        waitVBlank();
         if (rowDirty)
         {
             u16 cell = (u16)(HS_ROW_FIRST + newRank) * 32;
@@ -1202,21 +1213,21 @@ void titleScreen(void)
         writeText(13, 18, hsName[0]);
         writeNum(22, 18, hsScore[0], SCORE_DIGITS);
     }
-    WaitForVBlank();
+    waitVBlank();
     dmaCopyVram((u8 *)blockmap, 0x0000, 0x800);
 
     waitReleased(KEY_START | KEY_SELECT);
     for (;;)
     {
         pad0 = padsCurrent(0);
-        WaitForVBlank();
+        waitVBlank();
         if (pad0 & KEY_START)
         {
             resetGame();
             /* resetGame() only rebuilt the tilemap in RAM; push it to VRAM so
                the title text doesn't stay painted on the playing field (the
                in-game loop only ever uploads the HUD row and changed cells) */
-            WaitForVBlank();
+            waitVBlank();
             dmaCopyVram((u8 *)blockmap, 0x0000, 0x800);
             gameState = ST_PLAYING;
             return;
@@ -1250,14 +1261,14 @@ void gameOverScreen(void)
     writeText(10, 15, "SCORE");
     writeNum(16, 15, score, SCORE_DIGITS);
     writeText(10, 18, "PRESS START");
-    WaitForVBlank();
+    waitVBlank();
     dmaCopyVram((u8 *)blockmap, 0x0000, 0x800);
 
     waitReleased(KEY_START);
     for (;;)
     {
         pad0 = padsCurrent(0);
-        WaitForVBlank();
+        waitVBlank();
         if (pad0 & KEY_START)
             break;
     }
@@ -1293,9 +1304,9 @@ void splashScreen(void)
        is pure black.  Only then do we start the fade-in. */
     setScreenOn();
     setBrightness(0);
-    WaitForVBlank();
+    waitVBlank();
     setBrightness(0);
-    WaitForVBlank();
+    waitVBlank();
     setBrightness(0);
 
     setFadeEffectEx(FADE_IN, 12);
@@ -1304,7 +1315,7 @@ void splashScreen(void)
     for (;;)
     {
         pad0 = padsCurrent(0);
-        WaitForVBlank();
+        waitVBlank();
         if (pad0 & KEY_START)
             break;
     }
@@ -1315,7 +1326,7 @@ void splashScreen(void)
     {
         u8 i;
         for (i = 0; i < 14; i++)
-            WaitForVBlank();
+            waitVBlank();
     }
     setBrightness(0);
     setScreenOff();
@@ -1328,6 +1339,18 @@ int main(void)
     setScreenOff();
     setBrightness(0);
     WaitForVBlank();
+
+    /* Initialize SPC700 sound engine (copies the Impulse Tracker driver) */
+    spcBoot();
+
+    /* Tell the driver where the soundbank lives in ROM */
+    spcSetBank(&SOUNDBANK__);
+
+    /* Load the pizza music module (takes a moment while data is transferred) */
+    spcLoad(MOD_PIZZA_MUSIC);
+
+    /* Start playing from the beginning; it will loop according to the module */
+    spcPlay(0);
 
     randSeed = 0xACE1;
     newRank = NO_RANK;
@@ -1346,7 +1369,7 @@ int main(void)
     dmaCopyCGram((u8 *)&palwalls, 0, (&palwalls_end - &palwalls));
 
     drawWalls();
-    WaitForVBlank();
+    waitVBlank();
     dmaCopyVram((u8 *)blockmap, 0x0000, 0x800);
 
     bgSetGfxPtr(0, 0x1000);
@@ -1391,7 +1414,7 @@ int main(void)
             if (hudDirty)
                 drawHud();
             drawSprites();
-            WaitForVBlank();
+            waitVBlank();
             if (hudDirty)
             {
                 /* HUD text only ever touches row 0 -- 32 cells, 64 bytes */
